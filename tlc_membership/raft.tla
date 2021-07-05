@@ -2,7 +2,7 @@
 \* This is the formal specification for the Raft consensus algorithm.
 \*
 \* Copyright 2014 Diego Ongaro, 2015 Brandon Amos and Huanchen Zhang,
-\* 2016 Daniel Ricketts, 2021 George Pîrlea.
+\* 2016 Daniel Ricketts, 2021 George Pîrlea and Darius Foo.
 \*
 \* This work is licensed under the Creative Commons Attribution-4.0
 \* International License https://creativecommons.org/licenses/by/4.0/
@@ -10,24 +10,14 @@
 EXTENDS Naturals, Integers, TypedBags, FiniteSets, Sequences, SequencesExt, TLC
 
 \* The initial and global set of server IDs.
-CONSTANTS
-    \* @type: Set(Int);
-    InitServer,
-    \* @type: Set(Int);
-    Server
+CONSTANTS InitServer, Server
 
 \* The number of rounds to catch new servers up for.
 \* Must be >= 1.
-CONSTANT
-    \* @type: Int;
-    NumRounds
+CONSTANT NumRounds
 
 \* Log metadata to distinguish values from configuration changes.
-CONSTANT 
-    \* @type: Str;
-    ValueEntry,
-    \* @type: Str;
-    ConfigEntry
+CONSTANT ValueEntry, ConfigEntry
 
 \* Constraints
 MaxLogLength == 5
@@ -70,11 +60,8 @@ CONSTANTS
     AppendEntriesResponse,
 
     \* Membership changes
-    \* @type: Str;
     CatchupRequest,
-    \* @type: Str;
     CatchupResponse,
-    \* @type: Str;
     CheckOldConfig
 
 -----
@@ -123,9 +110,7 @@ EmptyAERespMsg == [
 \* Global variables
 
 \* A bag of records representing requests and responses sent from one server
-\* to another. We differentiate between the message types to work with Apalache
-\* without having to define a supertype. We introduce WrapMsg and UnwrapMsg.
-\* This is a hack. See: https://github.com/informalsystems/apalache/issues/401
+\* to another. We differentiate between the message types to support Apalache.
 VARIABLE
     \* @typeAlias: ENTRY = [term: Int, value: Int];
     \* @typeAlias: LOGT = Seq(ENTRY);
@@ -141,8 +126,7 @@ VARIABLE
 \* restarted: how many times each server restarted
 VARIABLE
     \* @typeAlias: ACTION = [action: Str, executedOn: Int, msg: MSG];
-    \* @typeAlias: HISTORY = [server: Int -> [restarted: Int, timeout: Int], global: Seq(ACTION), hadNumLeaders: Int, hadNumClientRequests: Int, hadNumTriedMembershipChanges: Int, hadNumMembershipChanges: Int];
-    \* @type: HISTORY;
+    \* @type: [server: Int -> [restarted: Int, timeout: Int], global: Seq(ACTION), hadNumLeaders: Int, hadNumClientRequests: Int];
     history
 
 ----
@@ -207,8 +191,6 @@ leaderVars == <<nextIndex, matchIndex>>
 
 \* All variables; used for stuttering (asserting state hasn't changed).
 vars == <<messages, serverVars, candidateVars, leaderVars, logVars>>
-\* @typeAlias: SYSTEMSTATE = [ messages: MSG -> Int, currentTerm: Int -> Int, state: Int -> Str, votedFor: Int -> Int, votesResponded: Int -> Set(Int), votesGranted: Int -> Set(Int), nextIndex: Int -> (Int -> Int), matchIndex: Int -> (Int -> Int), log: Int -> LOGT, commitIndex: Int -> Int];
-\* @type: SYSTEMSTATE;
 systemState == [
     messages |-> messages,
     \* serverVars
@@ -225,6 +207,7 @@ systemState == [
     log |-> log,
     commitIndex |-> commitIndex
 ]
+
 
 ----
 \* Helpers
@@ -247,6 +230,19 @@ WithMessage(m, msgs) == msgs (+) SetToBag({m})
 \* @type: (MSG, MSG -> Int) => MSG -> Int;
 WithoutMessage(m, msgs) == msgs (-) SetToBag({m})
 
+\* @type: a => MSG;
+WrapMsg(m) == 
+    IF "wrapped" \notin DOMAIN m THEN
+        IF m.mtype = RequestVoteRequest THEN
+            [ wrapped |-> TRUE, mtype |-> m.mtype, mterm |-> m.mterm, msource |-> m.msource, mdest |-> m.mdest, RVReq |-> m, RVResp |-> EmptyRVRespMsg, AEReq |-> EmptyAEReqMsg, AEResp |-> EmptyAERespMsg ]
+        ELSE IF m.mtype = RequestVoteResponse THEN
+            [ wrapped |-> TRUE, mtype |-> m.mtype, mterm |-> m.mterm, msource |-> m.msource, mdest |-> m.mdest, RVReq |-> EmptyRVReqMsg, RVResp |-> m, AEReq |-> EmptyAEReqMsg, AEResp |-> EmptyAERespMsg ]
+        ELSE IF m.mtype = AppendEntriesRequest THEN
+            [ wrapped |-> TRUE, mtype |-> m.mtype, mterm |-> m.mterm, msource |-> m.msource, mdest |-> m.mdest, RVReq |-> EmptyRVReqMsg, RVResp |-> EmptyRVRespMsg, AEReq |-> m, AEResp |-> EmptyAERespMsg ]
+        ELSE
+            [ wrapped |-> TRUE, mtype |-> m.mtype, mterm |-> m.mterm, msource |-> m.msource, mdest |-> m.mdest, RVReq |-> EmptyRVReqMsg, RVResp |-> EmptyRVRespMsg, AEReq |-> EmptyAEReqMsg, AEResp |-> m ]
+    ELSE m
+
 \* Add a message to the bag of messages.
 SendDirect(m) == 
     LET msgAction == [action |-> "Send", executedOn |-> m.msource, msg |-> m]
@@ -266,19 +262,25 @@ SendDirect(m) ==
             !["hadNumTriedMembershipChanges"] = history["hadNumTriedMembershipChanges"] + 1,
             !["global"] = Append(Append(history["global"], membershipAction), msgAction)]
 
+\* @type: [msource: Int] => Bool;
+SendWrapped(m) == 
+    LET w == WrapMsg(m) IN
+    SendDirect(w)
+
 \* Used by the environment to duplicate messges.
 SendWithoutHistoryDirect(m) == 
     messages' = WithMessage(m, messages)
+
+\* @type: [msource: Int] => Bool;
+SendWithoutHistoryWrapped(m) == 
+    LET w == WrapMsg(m) IN
+    SendWithoutHistoryDirect(w)
 
 \* Remove a message from the bag of messages. Used when a server is done
 DiscardDirect(m) ==
     LET action == [action |-> "Receive", executedOn |-> m.mdest, msg |-> m] IN
     /\ messages'    = WithoutMessage(m, messages)
     /\ history'     = [history EXCEPT !["global"] = Append(history["global"], action)]
-
-\* Used by the environment to drop messges.
-DiscardWithoutHistoryDirect(m) ==
-    messages' = WithoutMessage(m, messages)
 
 DiscardDirectWithMembershipChange(m, extraAction) ==
     LET action == [action |-> "Receive", executedOn |-> m.mdest, msg |-> m] IN
@@ -287,46 +289,20 @@ DiscardDirectWithMembershipChange(m, extraAction) ==
             !["hadNumMembershipChanges"] = history["hadNumMembershipChanges"] + 1,
             !["global"] = Append(Append(history["global"], action), extraAction)]
 
-\* BEGIN wrapped message operators
-
-\* @type: a => MSG;
-WrapMsg(m) == 
-    IF "wrapped" \notin DOMAIN m THEN
-        IF m.mtype = RequestVoteRequest THEN
-            [ wrapped |-> TRUE, mtype |-> m.mtype, mterm |-> m.mterm, msource |-> m.msource, mdest |-> m.mdest, RVReq |-> m, RVResp |-> EmptyRVRespMsg, AEReq |-> EmptyAEReqMsg, AEResp |-> EmptyAERespMsg ]
-        ELSE IF m.mtype = RequestVoteResponse THEN
-            [ wrapped |-> TRUE, mtype |-> m.mtype, mterm |-> m.mterm, msource |-> m.msource, mdest |-> m.mdest, RVReq |-> EmptyRVReqMsg, RVResp |-> m, AEReq |-> EmptyAEReqMsg, AEResp |-> EmptyAERespMsg ]
-        ELSE IF m.mtype = AppendEntriesRequest THEN
-            [ wrapped |-> TRUE, mtype |-> m.mtype, mterm |-> m.mterm, msource |-> m.msource, mdest |-> m.mdest, RVReq |-> EmptyRVReqMsg, RVResp |-> EmptyRVRespMsg, AEReq |-> m, AEResp |-> EmptyAERespMsg ]
-        ELSE
-            [ wrapped |-> TRUE, mtype |-> m.mtype, mterm |-> m.mterm, msource |-> m.msource, mdest |-> m.mdest, RVReq |-> EmptyRVReqMsg, RVResp |-> EmptyRVRespMsg, AEReq |-> EmptyAEReqMsg, AEResp |-> m ]
-    ELSE m
-
-\* @type: [msource: Int] => Bool;
-SendWrapped(m) == 
-    LET w == WrapMsg(m) IN
-    SendDirect(w)
-
-\* @type: [msource: Int] => Bool;
-SendWithoutHistoryWrapped(m) == 
-    LET w == WrapMsg(m) IN
-    SendWithoutHistoryDirect(w)
-
 \* processing a message.
 \* @type: [mdest: Int] => Bool;
 DiscardWrapped(m) ==
     LET w == WrapMsg(m) IN
     DiscardDirect(w)
 
+\* Used by the environment to drop messges.
+DiscardWithoutHistoryDirect(m) ==
+    messages' = WithoutMessage(m, messages)
+
 \* @type: a => Bool;
 DiscardWithoutHistoryWrapped(m) ==
     LET w == WrapMsg(m) IN
     DiscardWithoutHistoryDirect(w)
-
-\* @type: (a, b) => Bool;
-DiscardWithMembershipChangeWrapped(m, extraAction) ==
-    LET w == WrapMsg(m) IN
-    DiscardDirectWithMembershipChange(w, extraAction)
 
 \* Combination of Send and Discard
 ReplyDirect(response, request) ==
@@ -343,23 +319,19 @@ ReplyWrapped(response, request) ==
     LET wreq == WrapMsg(request) IN
     ReplyDirect(wresp, wreq)
 
-\* END wrapped message operators
+\* Default: change when needed
+ Send(m) == SendDirect(m)
+ Reply(response, request) == ReplyDirect(response, request)
+ Discard(m) == DiscardDirect(m)
+ DiscardWithMembershipChange(m, extraAction) == DiscardDirectWithMembershipChange(m, extraAction)
+ SendWithoutHistory(m) == SendWithoutHistoryDirect(m)
+ DiscardWithoutHistory(m) == DiscardWithoutHistoryDirect(m) 
 
-\* For use with TLC: uncomment when needed
-\*  Send(m) == SendDirect(m)
-\*  Reply(response, request) == ReplyDirect(response, request)
-\*  Discard(m) == DiscardDirect(m)
-\*  SendWithoutHistory(m) == SendWithoutHistoryDirect(m)
-\*  DiscardWithoutHistory(m) == DiscardWithoutHistoryDirect(m) 
-\*  DiscardWithMembershipChange(m, extraAction) == DiscardDirectWithMembershipChange(m, extraAction)
-
-\* Default: For use with Apalache, but it also works with TLC (albeit slower)
-Send(m) == SendWrapped(m)
-Reply(response, request) == ReplyWrapped(response, request)
-Discard(m) == DiscardWrapped(m)
-SendWithoutHistory(m) == SendWithoutHistoryWrapped(m)
-DiscardWithoutHistory(m) == DiscardWithoutHistoryWrapped(m) 
-DiscardWithMembershipChange(m, extraAction) == DiscardWithMembershipChangeWrapped(m, extraAction)
+\*Send(m) == SendWrapped(m)
+\*Reply(response, request) == ReplyWrapped(response, request)
+\*Discard(m) == DiscardWrapped(m)
+\*SendWithoutHistory(m) == SendWithoutHistoryWrapped(m)
+\*DiscardWithoutHistory(m) == DiscardWithoutHistoryWrapped(m) 
 
 \* Return the minimum value from a set, or undefined if the set is empty.
 \* @type: Set(Int) => Int;
@@ -368,11 +340,9 @@ Min(s) == CHOOSE x \in s : \A y \in s : x <= y
 \* @type: Set(Int) => Int;
 Max(s) == CHOOSE x \in s : \A y \in s : x >= y
 
-\* @type: Set(Int) => Int;
 MaxOrZero(s) == IF s = {} THEN 0 ELSE Max(s)
 
 \* Return the index of the latest configuration in server i's log.
-\* @type: (Int, SYSTEMSTATE) => Int;
 GetHistoricalMaxConfigIndex(i, s) ==
     LET configIndexes == { index \in 1..Len(s.log[i]) : s.log[i][index].type = ConfigEntry }
     IN IF configIndexes = {} THEN 0
@@ -1049,12 +1019,31 @@ LogMatching ==
         \A n \in (1..Len(log[i])) \cap (1..Len(log[j])) :
             log[i][n].term = log[j][n].term =>
             SubSeq(log[i],1,n) = SubSeq(log[j],1,n)
-
 ----
 \* A leader has all committed entries in its log. This is expressed
 \* by LeaderCompleteness below. The inductive invariant for
 \* that property is the conjunction of LeaderCompleteness with the
 \* other three properties below.
+
+\* This property, written by Daniel Ricketts, is in fact
+\* violated. This suggests the spec was not model-checked
+\* extensively.
+
+\* The English description is correct, but the TLA
+\* does NOT match it due to a confusion about the meaning
+\* of the spec variables.
+
+\* Votes are only granted to servers with logs
+\* that are at least as up to date
+VotesGrantedInv_false ==
+    \A i \in Server :
+    \A j \in votesGranted[i] :
+        currentTerm[i] = currentTerm[j] =>
+        \* The following is a subtlety:
+        \* Only the committed entries of j are
+        \* a prefix of i's log, not the entire 
+        \* log of j
+        IsPrefix(Committed(j),log[i])
 
 VotesGrantedInv ==
     \A i, j \in Server :
@@ -1080,6 +1069,18 @@ MoreUpToDateCorrect ==
         \/ /\ LastTerm(log[i]) = LastTerm(log[j])
            /\ Len(log[i]) >= Len(log[j])) =>
        IsPrefix(Committed(j), log[i])
+
+\* This property, written by Daniel Rickett's, is in fact
+\* violated by the spec (when there are multiple concurrent leaders).
+\*  This suggests the spec was not model-checked extensively.
+
+\* The committed entries in every log are a prefix of the
+\* leader's log
+LeaderCompleteness_false ==
+    \A i \in Server :
+        state[i] = Leader =>
+        \A j \in Server :
+            IsPrefix(Committed(j),log[i])
 
 \* If a log entry is committed in a given term, then that
 \* entry will be present in the logs of the leaders
@@ -1190,13 +1191,14 @@ CommitWhenConcurrentLeaders_constraint ==
 \*  traces of length 20 that satisfy CommitWhenConcurrentLeaders_constraint.
 \* But we can use the fact that:
 \*      CommitWhenConcurrentLeaders => ConcurrentLeaders on a prefix of the trace
-\* to great effect! (Reference: "punctuated search" in Michael et. al, Eurosys 2019)
+\* to great effect!
+\*
+\* Reference: "punctuated search" in Michaels et al (Eurosys 2019).
+
 CommitWhenConcurrentLeaders_unique ==
     \E s1, s2, s3 \in Server :
         /\ Cardinality({s1, s2, s3}) = 3
-        /\ LET  
-                \* @type: HISTORY;
-                ConcurrentLeaders_trace == [global |-> <<[action |-> "Timeout", executedOn |-> s1], [action |-> "Send", executedOn |-> s1, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s1, msg |-> [mdest |-> s1, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Receive", executedOn |-> s1, msg |-> [mdest |-> s1, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s1, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s2, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s1, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s2, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s1, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "BecomeLeader", executedOn |-> s1, leaders |-> {s1}], [action |-> "Timeout", executedOn |-> s2], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s3, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s3, msg |-> [mdest |-> s3, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s3, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s3, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s3, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "BecomeLeader", executedOn |-> s2, leaders |-> {s1, s2}]>>, hadNumClientRequests |-> 0, hadNumLeaders |-> 2, hadNumMembershipChanges |-> 0, hadNumTriedMembershipChanges |-> 0, server |-> (s1 :> [restarted |-> 0, timeout |-> 1] @@ s2 :> [restarted |-> 0, timeout |-> 1] @@ s3 :> [restarted |-> 0, timeout |-> 0])]
+        /\ LET  ConcurrentLeaders_trace == [global |-> <<[action |-> "Timeout", executedOn |-> s1], [action |-> "Send", executedOn |-> s1, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s1, msg |-> [mdest |-> s1, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Receive", executedOn |-> s1, msg |-> [mdest |-> s1, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s1, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s2, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s1, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s2, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s1, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "BecomeLeader", executedOn |-> s1, leaders |-> {s1}], [action |-> "Timeout", executedOn |-> s2], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s3, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s3, msg |-> [mdest |-> s3, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s3, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s3, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s3, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "BecomeLeader", executedOn |-> s2, leaders |-> {s1, s2}]>>, hadNumClientRequests |-> 0, hadNumLeaders |-> 2, hadNumMembershipChanges |-> 0, hadNumTriedMembershipChanges |-> 0, server |-> (s1 :> [restarted |-> 0, timeout |-> 1] @@ s2 :> [restarted |-> 0, timeout |-> 1] @@ s3 :> [restarted |-> 0, timeout |-> 0])]
                 maxLen == Min({Len(ConcurrentLeaders_trace["global"]), Len(history["global"])})
                 prefix == SubSeq(ConcurrentLeaders_trace["global"], 1, maxLen)
             IN IsPrefix(prefix, history["global"])
@@ -1226,9 +1228,7 @@ MajorityOfClusterRestarts == ~
 MajorityOfClusterRestarts_constraint ==
     \E s1, s2, s3 \in Server :
         /\ Cardinality({s1, s2, s3}) = 3
-        /\ LET  
-                \* @type: HISTORY;
-                CommitWhenConcurrentLeaders_trace == [global |-> <<[action |-> "Timeout", executedOn |-> s1], [action |-> "Send", executedOn |-> s1, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s1, msg |-> [mdest |-> s1, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Receive", executedOn |-> s1, msg |-> [mdest |-> s1, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s1, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s2, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s1, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s2, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s1, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "BecomeLeader", executedOn |-> s1, leaders |-> {s1}], [action |-> "Timeout", executedOn |-> s2], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s3, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s3, msg |-> [mdest |-> s3, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s3, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s3, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s3, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "BecomeLeader", executedOn |-> s2, leaders |-> {s1, s2}], [action |-> "Send", executedOn |-> s1, msg |-> [mcommitIndex |-> 0, mdest |-> s2, mentries |-> <<[term |-> 2, type |-> "ValueEntry", value |-> 1]>>, mprevLogIndex |-> 0, mprevLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "AppendEntriesRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mcommitIndex |-> 0, mdest |-> s3, mentries |-> <<[term |-> 3, type |-> "ValueEntry", value |-> 2]>>, mprevLogIndex |-> 0, mprevLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "AppendEntriesRequest"]], [action |-> "Receive", executedOn |-> s3, msg |-> [mcommitIndex |-> 0, mdest |-> s3, mentries |-> <<[term |-> 3, type |-> "ValueEntry", value |-> 2]>>, mprevLogIndex |-> 0, mprevLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "AppendEntriesRequest"]], [action |-> "Send", executedOn |-> s3, msg |-> [mdest |-> s2, mmatchIndex |-> 1, msource |-> s3, msuccess |-> TRUE, mterm |-> 3, mtype |-> "AppendEntriesResponse"]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mmatchIndex |-> 1, msource |-> s3, msuccess |-> TRUE, mterm |-> 3, mtype |-> "AppendEntriesResponse"]], [action |-> "CommitEntry", entry |-> [term |-> 3, type |-> "ValueEntry", value |-> 2], executedOn |-> s2], [action |-> "Receive", executedOn |-> s2, msg |-> [mcommitIndex |-> 0, mdest |-> s2, mentries |-> <<[term |-> 2, type |-> "ValueEntry", value |-> 1]>>, mprevLogIndex |-> 0, mprevLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "AppendEntriesRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s1, mmatchIndex |-> 0, msource |-> s2, msuccess |-> FALSE, mterm |-> 3, mtype |-> "AppendEntriesResponse"]]>>, hadNumClientRequests |-> 2, hadNumLeaders |-> 2, hadNumMembershipChanges |-> 0, hadNumTriedMembershipChanges |-> 0, server |-> (s1 :> [restarted |-> 0, timeout |-> 1] @@ s2 :> [restarted |-> 0, timeout |-> 1] @@ s3 :> [restarted |-> 0, timeout |-> 0])]
+        /\ LET  CommitWhenConcurrentLeaders_trace == [global |-> <<[action |-> "Timeout", executedOn |-> s1], [action |-> "Send", executedOn |-> s1, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s1, msg |-> [mdest |-> s1, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Receive", executedOn |-> s1, msg |-> [mdest |-> s1, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s1, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s2, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s1, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s2, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s1, msg |-> [mdest |-> s1, mlog |-> <<>>, msource |-> s1, mterm |-> 2, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "BecomeLeader", executedOn |-> s1, leaders |-> {s1}], [action |-> "Timeout", executedOn |-> s2], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s3, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s3, msg |-> [mdest |-> s3, mlastLogIndex |-> 0, mlastLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteRequest"]], [action |-> "Send", executedOn |-> s3, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s3, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s3, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mlog |-> <<>>, msource |-> s2, mterm |-> 3, mtype |-> "RequestVoteResponse", mvoteGranted |-> TRUE]], [action |-> "BecomeLeader", executedOn |-> s2, leaders |-> {s1, s2}], [action |-> "Send", executedOn |-> s1, msg |-> [mcommitIndex |-> 0, mdest |-> s2, mentries |-> <<[term |-> 2, type |-> "ValueEntry", value |-> 1]>>, mprevLogIndex |-> 0, mprevLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "AppendEntriesRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mcommitIndex |-> 0, mdest |-> s3, mentries |-> <<[term |-> 3, type |-> "ValueEntry", value |-> 2]>>, mprevLogIndex |-> 0, mprevLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "AppendEntriesRequest"]], [action |-> "Receive", executedOn |-> s3, msg |-> [mcommitIndex |-> 0, mdest |-> s3, mentries |-> <<[term |-> 3, type |-> "ValueEntry", value |-> 2]>>, mprevLogIndex |-> 0, mprevLogTerm |-> 0, msource |-> s2, mterm |-> 3, mtype |-> "AppendEntriesRequest"]], [action |-> "Send", executedOn |-> s3, msg |-> [mdest |-> s2, mmatchIndex |-> 1, msource |-> s3, msuccess |-> TRUE, mterm |-> 3, mtype |-> "AppendEntriesResponse"]], [action |-> "Receive", executedOn |-> s2, msg |-> [mdest |-> s2, mmatchIndex |-> 1, msource |-> s3, msuccess |-> TRUE, mterm |-> 3, mtype |-> "AppendEntriesResponse"]], [action |-> "CommitEntry", entry |-> [term |-> 3, type |-> "ValueEntry", value |-> 2], executedOn |-> s2], [action |-> "Receive", executedOn |-> s2, msg |-> [mcommitIndex |-> 0, mdest |-> s2, mentries |-> <<[term |-> 2, type |-> "ValueEntry", value |-> 1]>>, mprevLogIndex |-> 0, mprevLogTerm |-> 0, msource |-> s1, mterm |-> 2, mtype |-> "AppendEntriesRequest"]], [action |-> "Send", executedOn |-> s2, msg |-> [mdest |-> s1, mmatchIndex |-> 0, msource |-> s2, msuccess |-> FALSE, mterm |-> 3, mtype |-> "AppendEntriesResponse"]]>>, hadNumClientRequests |-> 2, hadNumLeaders |-> 2, hadNumMembershipChanges |-> 0, hadNumTriedMembershipChanges |-> 0, server |-> (s1 :> [restarted |-> 0, timeout |-> 1] @@ s2 :> [restarted |-> 0, timeout |-> 1] @@ s3 :> [restarted |-> 0, timeout |-> 0])]
                 maxLen == Min({Len(CommitWhenConcurrentLeaders_trace["global"]), Len(history["global"])})
                 prefix == SubSeq(CommitWhenConcurrentLeaders_trace["global"], 1, maxLen)
             IN IsPrefix(prefix, history["global"])
@@ -1283,8 +1283,15 @@ perms == Permutations(Server)
 
 ===============================================================================
 
+
+
 \* Changelog:
-\* 
+\*  
+\* 2021-04-??:
+\* - Abandoned Apalache due to slowness and went back to TLC. There are remains
+\*   of the Apalache-specific annotations and message wrapping/unwrapping, but
+\*   those are not actually used. The annotations are no longer up-to-date. 
+\*
 \* 2021-04-09:
 \* - Added type annotations for Apalache symbolic model checker. As part of
 \*   this change, the message format was changed to a tagged union.
@@ -1292,7 +1299,7 @@ perms == Permutations(Server)
 \* 2016-09-09:
 \* - Daniel Ricketts added the major safety invariants and proved them in
 \*   TLAPS.
-\* 
+\*
 \* 2015-05-10:
 \* - Add cluster membership changes as described in Section 4 of
 \*     Diego Ongaro. Consensus: Bridging theory and practice.
@@ -1303,6 +1310,7 @@ perms == Permutations(Server)
 \*     HandleCatchupRequest, HandleCatchupResponse,
 \*     HandleCheckOldConfig 
 \*
+\* 
 \* 2014-12-02:
 \* - Fix AppendEntries to only send one entry at a time, as originally
 \*   intended. Since SubSeq is inclusive, the upper bound of the range should
