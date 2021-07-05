@@ -3,6 +3,8 @@
 TLA+ specifications for the [Raft consensus
 algorithm](https://raftconsensus.github.io/).
 
+## Original specs
+
 This repository contains multiple specifications adapted by us (George Pîrlea
 and Darius Foo) from three different existing Raft TLA specifications, which can
 be found in the `thirdparty` folder:
@@ -19,6 +21,8 @@ as a [course project in
 [developed in 2016]((https://github.com/dricketts/raft.tla)); it refactors
 Ongaro's spec to make it more readable, adds some TLAPS proofs, and states some
 properties (some of which are incorrect)
+
+## Our versions
 
 Our specifications (really, different versions of the same specification) are
 as follows:
