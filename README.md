@@ -1,11 +1,19 @@
-# Raft TLA specification
+# TLA+ specifications for Raft, including membership changes
 
-TLA+ specifications for the [Raft consensus
-algorithm](https://raftconsensus.github.io/).
+This repository contains a number of TLA+ specifications of the [Raft consensus protocol](https://raftconsensus.github.io/). Of particular interest are the following:
+
+- `tlc_membership` -- a version of Raft with one-at-a-time **membership changes** (as described in [Ongaro's PhD disseration](https://web.stanford.edu/~ouster/cgi-bin/papers/OngaroPhD.pdf)). This includes a few "interesting" scenarios (properties) which can be passes to TLC to generate long traces via "punctuated search".
+
+- `apalache_no_membership` -- a version of Ricketts' spec with **type annotations** for
+the [Apalache symbolic model checker](https://apalache.informal.systems/). This
+folder also contains annotated versions of some TLA libraries used in our
+specification, but _does not_ model membership changes.
+
+The `apalache_no_membership` spec is known to work with Apalache 0.16.5 build 417cf58.
 
 ## Original specs
 
-This repository contains multiple specifications adapted by us (George Pîrlea
+This repository contains specifications adapted by us (George Pîrlea
 and Darius Foo) from three different existing Raft TLA specifications, which can
 be found in the `thirdparty` folder:
 
@@ -22,23 +30,14 @@ as a [course project in
 Ongaro's spec to make it more readable, adds some TLAPS proofs, and states some
 properties (some of which are incorrect)
 
-## Our versions
+## Abandoned effort to annotate membership changes
 
-Our specifications (really, different versions of the same specification) are
-as follows:
-
-- `apalache_no_membership` -- a version of Ricketts' spec with annotations for
-the [Apalache symbolic model checker](https://apalache.informal.systems/); this
-folder also contains annotated versions of some TLA libraries used in our
-specification; this version _does not_ have membership changes
-
-- `tlc_membership` -- a version with _membership changes_ and extra properties;
-we passed it to TLC to generate long traces via "punctuated search"; **if you
-are not interested in Apalache, this is the version you want to look at**
+Besides the above, this repository also contains an abandoned effort to add type annotations to the version of the spec that includes membership changes.
 
 - `apalache_membership_broken` -- an attempt to make the `membership` version
-work with Apalache; abandoned after fighting with Apalache's type inference
-algorithm for too long; if you make this work, please let us know!
+work with (an older version of) Apalache, abandoned after fighting with the
+type inference algorithm for too long. If you make this work, please let us know by submiting a pull request.
+
 
 ## Attribution & Licensing
 
